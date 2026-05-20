@@ -43,6 +43,46 @@ float bilinearInt_float(Array2<float> values, Vector2 idx)
     float q1 = f_x0y1 * (1.f - deltaX) + f_x1y1 * deltaX;
     return q0 * (1.f - deltaY) + q1 * deltaY;
 }
+
+float interpolation_for_particles_vx(Vector2 particle_pos, Array2<float> grid_v, Grid2 grid)
+{
+    // indice de la celda que contiene la particula
+    Vector2 cellIdx = grid.getFaceIndexX(particle_pos);
+    int i = cellIdx.x;
+    int j = cellIdx.y;
+    // pesos (w): posicion normalizada de la particula dentro de la celda
+    float wx = particle_pos.x / grid.getDx().x - i;
+    float wy = particle_pos.y / grid.getDx().y - 0.5 - j; // pk las posiciones de las velocidades estan en las caras izdas
+
+    Index2 facesX = grid.getSizeFacesX();
+    float v00 = grid_v[Index2(i, j)];
+    float v10 = (i == facesX.x) ? v00 : grid_v[Index2(i + 1, j)]; // ns si es asi o es (i >= facesX.x - 1)
+    float v01 = (j == facesX.y) ? v00 : grid_v[Index2(i, j + 1)];
+    float v11 = (i == facesX.x || j == facesX.y) ? v00 : grid_v[Index2(i + 1, j + 1)];
+
+    return (1 - wx)*(1 - wy)*v00 + wx*(1 - wy)*v10 + (1 - wx)*wy*v01 + wx*wy*v11;
+}
+
+float interpolation_for_particles_vy(Vector2 particle_pos, Array2<float> grid_v, Grid2 grid)
+{
+    // indice de la celda que contiene la particula
+    Vector2 cellIdx = grid.getFaceIndexY(particle_pos);
+    int i = cellIdx.x;
+    int j = cellIdx.y;
+    // pesos (w): posicion normalizada de la particula dentro de la celda
+    float wx = particle_pos.x / grid.getDx().x - 0.5 - i; // pk las posiciones de las velocidades estan en las caras de abajo
+    float wy = particle_pos.y / grid.getDx().y - j;  
+
+    Index2 facesY = grid.getSizeFacesY();
+    float v00 = grid_v[Index2(i, j)];
+    float v10 = (i == facesY.x) ? v00 : grid_v[Index2(i + 1, j)];
+    float v01 = (j == facesY.y) ? v00 : grid_v[Index2(i, j + 1)];
+    float v11 = (i == facesY.x || j == facesY.y) ? v00 : grid_v[Index2(i + 1, j + 1)];
+
+    return (1 - wx) * (1 - wy) * v00 + wx * (1 - wy) * v10 + (1 - wx) * wy * v01 + wx * wy * v11;
+}
+
+
 ////////////////////////////////////////////////
 // Add any reusable classes or functions HERE //
 ////////////////////////////////////////////////
@@ -54,18 +94,18 @@ void Fluid2::initParticles()
     // particle creation HERE
     srand(time(NULL));
 
-    float subcell_width = this->grid.getDx().x / Scene::particlesPerCell;
-    float subcell_height = this->grid.getDx().y / Scene::particlesPerCell;
+    float subcell_width = this->grid.getDx().x / (Scene::particlesPerCell * 0.5);
+    float subcell_height = this->grid.getDx().y / (Scene::particlesPerCell * 0.5);
 
     Vector2 vel(0, 0);
-    Vector3 ink(1, 1, 1);
+    Vector3 ink(0, 0, 0);
 
     float rX, rY, posX, posY;
     for (int i = 0; i < Scene::nCellsX; i++) {
         for (int j = 0; j < Scene::nCellsY; j++) {
             Index2 idx(i, j);
             Vector2 cellPos = this->grid.getCellPos(idx);
-            cellPos -= this->grid.getDx(); // lo pegamos a los limites inferiores
+            cellPos -= this->grid.getDx()*0.5f; // lo pegamos a los limites inferiores
 
             // subcelda 00
             rX = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
@@ -102,14 +142,207 @@ void Fluid2::initParticles()
 void Fluid2::fluidAdvection(const float dt)
 {
     if (flipEnabled) {
+        // GRID TO PARTICLES
         // move particles with RK2 with grid velocities HERE
-        // ensure particle remains inside the domain HERE
+        uint Nx = Scene::nCellsX;
+        uint Ny = Scene::nCellsY;
 
-        // create ink grid from particles HERE
-        // create velocityX grid from particles HERE
-        // create velocityY grid from particles HERE
+        Array2<float> vx = this->velocityX;
+        Array2<float> vy = this->velocityY;
+
+        Particles2 prts = this->particles;
+
+        for (uint p = 0; p < prts.getSize(); p++) {
+            // posicion en el punto medio (dt + dt/2)
+            // interpolar velocidad de la particula usando int. bilineal y las velocidades del grid
+            Vector2 particle_pos = prts.getPosition(p);
+            float particle_vx = interpolation_for_particles_vx(particle_pos, vx, this->grid);
+            float particle_vy = interpolation_for_particles_vy(particle_pos, vy, this->grid);
+
+            float particle_pos_mid_x = particle_pos.x + (dt * 0.5) * particle_vx;
+            float particle_pos_mid_y = particle_pos.y + (dt * 0.5) * particle_vy;
+            Vector2 particle_pos_mid(particle_pos_mid_x, particle_pos_mid_y);
+
+            // posición en dt+1
+            particle_vx = interpolation_for_particles_vx(particle_pos_mid, vx, this->grid);
+            particle_vy = interpolation_for_particles_vy(particle_pos_mid, vy, this->grid);
+
+            float particle_pos_new_x = particle_pos.x + dt * particle_vx;
+            float particle_pos_new_y = particle_pos.y + dt * particle_vy;
+
+            // ensure particle remains inside the domain HERE
+            if (particle_pos_new_x > this->grid.getDomain().maxPosition.x)
+                particle_pos_new_x = this->grid.getDomain().maxPosition.x;
+            if (particle_pos_new_x < this->grid.getDomain().minPosition.x)
+                particle_pos_new_x = this->grid.getDomain().minPosition.x;
+
+            if (particle_pos_new_y > this->grid.getDomain().maxPosition.y)
+                particle_pos_new_y = this->grid.getDomain().maxPosition.y;
+            if (particle_pos_new_y < this->grid.getDomain().minPosition.y)
+                particle_pos_new_y = this->grid.getDomain().minPosition.y;
+
+            Vector2 particle_pos_new(particle_pos_new_x, particle_pos_new_y);
+            this->particles.setPosition(p, particle_pos_new);
+        }
+
+        // PARTICLES TO GRID
+        // tengo todas las particulas en posiciones concretas, cada 4 dentro de sus respectivas celdas y 
+        // con un valor concreto cada una de tinta, velocidad x y velocidad y. se hace un proceso inverso
+        // al anterior.
+
+        // La información de la tinta se encuentra en el centro de la celda. Por cada partícula, se mira 
+        // como de cerca está al centro de sus 4 celdas más cercanas. En base a esa distancia, se asignan 
+        // los pesos de la interpolacion. Se acumula la tinta de la particula en cada celda, multiplicado
+        // por el peso calculado.
+        Array2<Vector3> inkCopy(Index2(Scene::nCellsX, Scene::nCellsY));
+        Array2<float> inkW(Index2(Scene::nCellsX, Scene::nCellsY));
+        Array2<float> vxCopy(Index2(this->grid.getSizeFacesX()));
+        Array2<float> vxW(Index2(this->grid.getSizeFacesX()));
+        Array2<float> vyCopy(Index2(this->grid.getSizeFacesY()));
+        Array2<float> vyW(Index2(this->grid.getSizeFacesY()));
+
+        float tx, ty, w00, w01, w10, w11;
+        for (uint p = 0; p < prts.getSize(); p++) {
+            Vector2 particle_pos = prts.getPosition(p);
+            // indice de la celda que contiene la particula
+            Vector2 cellIdx = grid.getCellIndex(particle_pos);
+            if (cellIdx.x < 0) cellIdx.x = -cellIdx.x;
+            if (cellIdx.y < 0) cellIdx.y = -cellIdx.y;
+            int i = cellIdx.x; int j = cellIdx.y;
+
+            // create ink grid from particles HERE
+            // pesos (w): posicion normalizada de la particula con respecto a los centros de las celdas
+            tx = cellIdx.x - i;
+            ty = cellIdx.y - j;
+            w00 = (1 - tx) * (1 - ty);
+            w10 = tx * (1.0f - ty);  
+            w01 = (1.0f - tx) * ty;  
+            w11 = tx * ty;
+            // acumular tinta al centro de las 4 celdas
+            inkCopy[Index2(i, j)] += prts.getInk(p) * w00;
+            inkW[Index2(i, j)] += w00;
+            if (i+1 < Scene::nCellsX) {
+                inkCopy[Index2(i + 1, j)] += prts.getInk(p) * w10;
+                inkW[Index2(i + 1, j)] += w10;
+            }
+            if (j+1 < Scene::nCellsY) {
+                inkW[Index2(i, j + 1)] += w01;
+                inkCopy[Index2(i, j + 1)] += prts.getInk(p) * w01;
+            }
+            if (i+1 < Scene::nCellsX && j+1 < Scene::nCellsY) {
+                inkW[Index2(i + 1, j + 1)] += w11;
+                inkCopy[Index2(i + 1, j + 1)] += prts.getInk(p) * w11;
+            }
+             
+            // create velocityX grid from particles HERE
+            // pesos (w): posicion normalizada de la particula con respecto a la cara izda de las celdas
+            cellIdx = grid.getFaceIndexX(particle_pos);
+            if (cellIdx.x < 0)
+                cellIdx.x = -cellIdx.x;
+            if (cellIdx.y < 0)
+                cellIdx.y = -cellIdx.y;
+            i = cellIdx.x;
+            j = cellIdx.y;
+
+            tx = cellIdx.x - i; 
+            ty = cellIdx.y - j;
+            w00 = (1 - tx) * (1 - ty);
+            w10 = tx * (1.0f - ty);
+            w01 = (1.0f - tx) * ty;  
+            w11 = tx * ty;
+            // acumular velocidad x en cada cara izda de las 4 celdas
+            vxCopy[Index2(i, j)] += prts.getVelocity(p).x * w00;
+            vxW[Index2(i, j)] += w00;
+            if (i+1 < grid.getSizeFacesX().x) {
+                vxCopy[Index2(i + 1, j)] += prts.getVelocity(p).x * w10;
+                vxW[Index2(i + 1, j)] += w10;
+            }
+            if (j+1 < grid.getSizeFacesX().y) {
+                vxCopy[Index2(i, j + 1)] += prts.getVelocity(p).x * w01;
+                vxW[Index2(i, j + 1)] += w01;
+            }
+            if (i+1 < grid.getSizeFacesX().x && j+1 < grid.getSizeFacesX().y) {
+                vxCopy[Index2(i + 1, j + 1)] += prts.getVelocity(p).x * w11;
+                vxW[Index2(i + 1, j + 1)] += w11;
+            }
+
+            // create velocityY grid from particles HERE
+            // pesos (w): posicion normalizada de la particula con respecto a la cara inferior de las celdas
+            cellIdx = grid.getFaceIndexY(particle_pos);
+            if (cellIdx.x < 0)
+                cellIdx.x = -cellIdx.x;
+            if (cellIdx.y < 0)
+                cellIdx.y = -cellIdx.y;
+            i = cellIdx.x;
+            j = cellIdx.y;
+
+            tx = cellIdx.x - i;
+            ty = cellIdx.y - j;
+            w00 = (1 - tx) * (1 - ty);
+            w10 = tx * (1.0f - ty);
+            w01 = (1.0f - tx) * ty;  
+            w11 = tx * ty;
+            // acumular velocidad x en cada cara inferior de las 4 celdas
+            vyCopy[Index2(i, j)] += prts.getVelocity(p).y * w00;
+            vyW[Index2(i, j)] += w00;
+            if (i+1 < grid.getSizeFacesY().x) {
+                vyCopy[Index2(i + 1, j)] += prts.getVelocity(p).y * w10;
+                vyW[Index2(i + 1, j)] += w10;
+
+            }
+            if (j+1 < grid.getSizeFacesY().y) {
+                vyCopy[Index2(i, j + 1)] += prts.getVelocity(p).y * w01;
+                vyW[Index2(i, j + 1)] += w01;
+
+            }
+            if (i+1 < grid.getSizeFacesY().x && j+1 < grid.getSizeFacesY().y) {
+                vyCopy[Index2(i + 1, j + 1)] += prts.getVelocity(p).y * w11;
+                vyW[Index2(i + 1, j + 1)] += w11;
+
+            }
+        }
+
+        // Normalizar Tinta
+        for (int i = 0; i < Scene::nCellsX; i++) {
+            for (int j = 0; j < Scene::nCellsY; j++) {
+                float w = inkW[Index2(i, j)];
+                if (w > 0.0f) {
+                    inkCopy[Index2(i, j)].x /= w;
+                    inkCopy[Index2(i, j)].y /= w;
+                    inkCopy[Index2(i, j)].z /= w;
+                } else {
+                    inkCopy[Index2(i, j)] = Vector3(0.0f, 0.0f, 0.0f);
+                }
+            }
+        }
+
+        // Normalizar Velocidad X
+        for (int i = 0; i < this->grid.getSizeFacesX().x; i++) {
+            for (int j = 0; j < this->grid.getSizeFacesX().y; j++) {
+                float w = vxW[Index2(i, j)];
+                if (w > 0.0f)
+                    vxCopy[Index2(i, j)] /= w;
+                else
+                    vxCopy[Index2(i, j)] = 0.0f;
+            }
+        }
+
+        // Normalizar Velocidad Y
+        for (int i = 0; i < this->grid.getSizeFacesY().x; i++) {
+            for (int j = 0; j < this->grid.getSizeFacesY().y; j++) {
+                float w = vyW[Index2(i, j)];
+                if (w > 0.0f)
+                    vyCopy[Index2(i, j)] /= w;
+                else
+                    vyCopy[Index2(i, j)] = 0.0f;
+            }
+        }
 
         // save current state velocities HERE
+        this->oldVelocityX = vxCopy;
+        this->oldVelocityY = vyCopy;
+        this->inkRGB = inkCopy;
+
         
     } else {
         Array2<float> velXCopy = this->velocityX;
@@ -212,9 +445,32 @@ void Fluid2::fluidAdvection(const float dt)
 }
 
 void Fluid2::fluidEmission()
-{
+{        
+    // 1 fuente = nx/20 x ny/20, desplazado a la izda
+    // 2 fuente = nx/20 x ny/20, centro
+    // 3 fuente = nx/20 x ny/20, desplazado a la dcha
+    float emit_width = Scene::nCellsX / 10;
+    float emit_height = Scene::nCellsY / 30;
+    float emit_center = Scene::nCellsX / 2;
+
     if (flipEnabled) {
         // Emitters contribution to particles HERE
+
+        //establezco el domain 
+        Vector2 minPos = this->grid.getNodePos(Index2(emit_center - (emit_width * 1.5), 1));
+        Vector2 maxPos = this->grid.getNodePos(Index2(emit_center + (emit_width * 1.5), emit_height));
+
+        Vector3 ink(1, 1, 1);
+        Vector2 vel(0, 1);
+        for (uint p = 0; p < this->particles.getSize(); p++) {
+            Vector2 particle_pos = this->particles.getPosition(p);
+
+            if (particle_pos.x > minPos.x && particle_pos.y > minPos.y 
+                && particle_pos.x > maxPos.x && particle_pos.y > maxPos.y) {
+                this->particles.setInk(p, ink);
+                this->particles.setVelocity(p, vel);
+            }
+        }
 
     } else {
         // Emitters contribution to grid HERE
@@ -468,8 +724,36 @@ void Fluid2::fluidPressureProjection(const float dt)
 
     if (flipEnabled) {
         // calculate FLIP velocity delta HERE
+        Array2<float> deltaVX(this->grid.getSizeFacesX());
+        Array2<float> deltaVY(this->grid.getSizeFacesY());
+
+        for (uint i = 0; i < this->grid.getSizeFacesX().x; i++) {
+            for (uint j = 0; j < this->grid.getSizeFacesX().y; j++) {
+                Index2 idx(i, j);
+                deltaVX[idx] = oldVelocityX[idx] - velocityX[idx];
+            }
+        }
+
+        for (uint i = 0; i < this->grid.getSizeFacesY().x; i++) {
+            for (uint j = 0; j < this->grid.getSizeFacesY().y; j++) {
+                Index2 idx(i, j);
+                deltaVY[idx] = oldVelocityY[idx] - velocityY[idx];
+            }
+        }
 
         // apply PIC/FLIP to update particles velocities HERE
+        for (uint p = 0; p < this->particles.getSize(); p++) {
+            Vector2 pvel_flip = this->particles.getVelocity(p);
+            pvel_flip.x += interpolation_for_particles_vx(this->particles.getPosition(p), deltaVX, this->grid);
+            pvel_flip.y += interpolation_for_particles_vy(this->particles.getPosition(p), deltaVY, this->grid);
+
+            Vector2 pvel_pic = this->particles.getVelocity(p);
+            pvel_pic.x += interpolation_for_particles_vx(this->particles.getPosition(p), velocityX, this->grid);
+            pvel_pic.y += interpolation_for_particles_vy(this->particles.getPosition(p), velocityY, this->grid);
+
+            Vector2 pvel = (0.95 * pvel_flip + 0.05 * pvel_pic);
+            this->particles.setVelocity(p, pvel);
+        }
     }
 }
 }  // namespace asa

@@ -6,8 +6,8 @@
 namespace asa
 {
 bool Scene::pauseFlag = true;
-uint Scene::nCellsX = 100;
-uint Scene::nCellsY = 100;
+uint Scene::nCellsX = 50;
+uint Scene::nCellsY = 50;
 float Scene::step = 0.01f;
 float Scene::kDensity = 1.0f;
 float Scene::kGravity = -1.0f;
